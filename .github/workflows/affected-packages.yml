@@ -1,0 +1,88 @@
+on:
+  workflow_call:
+    inputs:
+      package-files:
+        required: true
+        type: string
+        default: |
+          package.json
+          BUILD.bazel
+          BUILD
+          pom.xml
+          cargo.toml
+          composer.json
+          requirements.txt
+          ruby.gemspec
+    outputs:
+      affected_packages:
+        description: Affected packages
+        value: ${{ jobs.detect-affected-packages.outputs.affected_packages }}
+
+jobs:
+  detect-affected-packages:
+    runs-on: persistent-idp
+    timeout-minutes: 15
+    outputs:
+      affected_packages: ${{ steps.affected-packages.outputs.affected_packages }}
+    env:
+      DEFAULT_ENTITY_KIND: 'system'
+    steps:
+      - name: Get all files
+        id: changed-files
+        uses: tj-actions/changed-files@v46
+      - name: Get affected packages
+        id: affected-packages
+        env:
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          PACKAGE_FILES: ${{ inputs.package-files }}
+        run: |
+          if [ -z "$ALL_CHANGED_FILES" ]; then
+            echo "Error: ALL_CHANGED_FILES environment variable is not set"
+            exit 1
+          fi
+
+          if [ -z "$PACKAGE_FILES" ]; then
+            echo "Error: PACKAGE_FILES environment variable is not set"
+            exit 1
+          fi
+
+          # Convert PACKAGE_FILES string to array
+          readarray -t package_file_patterns <<< "$PACKAGE_FILES"
+
+          # Initialize array to store affected package directories
+          affected_packages=()
+
+          echo "Changed files: $ALL_CHANGED_FILES"
+
+          for file in $ALL_CHANGED_FILES; do
+            # Get the directory hierarchy of the file
+            dir=$(dirname "$file")
+
+            # Traverse up the directory tree until we find a package indicator file
+            # or reach the repository root
+            while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+              for pattern in "${package_file_patterns[@]}"; do
+                # Remove any trailing whitespace from pattern
+                pattern=$(echo "$pattern" | tr -d '[:space:]')
+
+                if [ -f "$dir/$pattern" ]; then
+                  affected_packages+=("$dir")
+                  break 2  # Found a package indicator, break out of both loops
+                fi
+              done
+              # Move up one level
+              dir=$(dirname "$dir")
+            done
+          done
+
+          # Remove duplicates by converting to newline, sorting and removing duplicates
+          unique_affected_packages=($(printf "%s\n" "${affected_packages[@]}" | sort -u))
+
+          # Output the results
+          if [ ${#unique_affected_packages[@]} -ne 0 ]; then
+            echo "Affected packages:"
+            printf "  %s\n" "${unique_affected_packages[@]}"
+            echo "affected_packages=${unique_affected_packages[*]}" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+          else
+            echo "No affected packages found"
+          fi
